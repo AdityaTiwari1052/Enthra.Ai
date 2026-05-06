@@ -56,27 +56,38 @@ export const createTask = async (req, res) => {
 
 export const getTasks = async (req, res) => {
   const query = {};
-  if (req.query.projectId) query.project = req.query.projectId;
-  if (req.query.status) query.status = req.query.status;
-  if (req.query.assignedTo) query.assignedTo = req.query.assignedTo;
 
   if (req.user.role === "Member") {
-    query.assignedTo = req.user._id;
+    // Members see tasks where:
+    // 1. They are assigned (assignedTo = user)
+    // 2. OR from any project they have access to (owner/team member)
+    query.$or = [{ assignedTo: req.user._id }];
+  }
+
+  if (req.query.projectId) {
+    query.project = req.query.projectId;
+  }
+  if (req.query.status) {
+    query.status = req.query.status;
   }
 
   const tasks = await Task.find(query)
     .populate("project", "name owner teamMembers")
     .populate("assignedTo", "name email role")
     .populate("createdBy", "name email role")
+    .populate("comments.author", "name email role")
     .sort({ createdAt: -1 });
 
+  // For Members: filter to only tasks from accessible projects OR assigned to them
   const filteredTasks = tasks.filter((task) => {
     if (!task.project) return false;
     const isOwner = task.project.owner.toString() === req.user._id.toString();
-    const isMember = task.project.teamMembers.some(
+    const isProjectMember = task.project.teamMembers.some(
       (member) => member.toString() === req.user._id.toString()
     );
-    return isOwner || isMember;
+    const isAssignedToUser = task.assignedTo && task.assignedTo._id.toString() === req.user._id.toString();
+    // Allow if user owns project OR is team member OR task assigned to them
+    return isOwner || isProjectMember || isAssignedToUser;
   });
 
   res.status(200).json(filteredTasks);
@@ -95,24 +106,28 @@ export const updateTask = async (req, res) => {
   }
 
   const { title, description, status, assignedTo, dueDate } = req.body;
+  const isAdmin = req.user.role === "Admin";
 
-  if (title !== undefined) task.title = title;
-  if (description !== undefined) task.description = description;
-  if (dueDate !== undefined) task.dueDate = dueDate;
-  if (status !== undefined) task.status = status;
-
-  if (assignedTo !== undefined) {
-    const assignee = await User.findById(assignedTo);
-    if (!assignee) {
-      res.status(404);
-      throw new Error("Assigned user not found");
+  // Admins can update all fields; Members can only update status
+  if (isAdmin) {
+    if (title !== undefined) task.title = title;
+    if (description !== undefined) task.description = description;
+    if (dueDate !== undefined) task.dueDate = dueDate;
+    if (assignedTo !== undefined) {
+      const assignee = await User.findById(assignedTo);
+      if (!assignee) {
+        res.status(404);
+        throw new Error("Assigned user not found");
+      }
+      if (!hasProjectAccess(task.project, assignee._id)) {
+        res.status(400);
+        throw new Error("Assigned user is not part of this project");
+      }
+      task.assignedTo = assignedTo;
     }
-    if (!hasProjectAccess(task.project, assignee._id)) {
-      res.status(400);
-      throw new Error("Assigned user is not part of this project");
-    }
-    task.assignedTo = assignedTo;
   }
+
+  if (status !== undefined) task.status = status;
 
   await task.save();
   const populated = await task.populate("project assignedTo createdBy", "name email role");
@@ -136,4 +151,39 @@ export const deleteTask = async (req, res) => {
 
   await Task.findByIdAndDelete(task._id);
   res.status(200).json({ message: "Task deleted" });
+};
+
+export const addComment = async (req, res) => {
+  const { text } = req.body;
+  if (!text || !text.trim()) {
+    res.status(400);
+    throw new Error("Comment text is required");
+  }
+
+  const task = await Task.findById(req.params.id);
+  if (!task) {
+    res.status(404);
+    throw new Error("Task not found");
+  }
+
+  if (!hasProjectAccess(task.project, req.user._id)) {
+    res.status(403);
+    throw new Error("No access to this task");
+  }
+
+  task.comments.push({
+    text: text.trim(),
+    author: req.user._id,
+    createdAt: new Date()
+  });
+
+  await task.save();
+
+  const populated = await task
+    .populate("project", "name owner teamMembers")
+    .populate("assignedTo", "name email role")
+    .populate("createdBy", "name email role")
+    .populate("comments.author", "name email role");
+
+  res.status(200).json(populated);
 };

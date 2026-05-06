@@ -2,20 +2,33 @@ import Task from "../Models/Task.js";
 import Project from "../Models/Project.js";
 
 export const getDashboard = async (req, res) => {
+  const userId = req.user._id.toString();
   const isMember = req.user.role === "Member";
 
-  const projectFilter = isMember
-    ? { $or: [{ owner: req.user._id }, { teamMembers: req.user._id }] }
-    : {};
+  // Get all projects where user has any access
+  let projectFilter = { $or: [{ owner: req.user._id }, { teamMembers: req.user._id }] };
 
-  const projects = await Project.find(projectFilter).select("_id");
-  const projectIds = projects.map((project) => project._id);
+  // Also include projects where user has assigned tasks (even if not in teamMembers)
+  const assignedTaskProjects = await Task.distinct("project", { assignedTo: req.user._id });
+  const projectIdsSet = new Set();
 
-  const taskFilter = isMember
-    ? { project: { $in: projectIds }, assignedTo: req.user._id }
-    : { project: { $in: projectIds } };
+  const baseProjects = await Project.find(projectFilter).select("_id");
+  baseProjects.forEach((p) => projectIdsSet.add(p._id.toString()));
+  assignedTaskProjects.forEach((id) => projectIdsSet.add(id.toString()));
 
-  const tasks = await Task.find(taskFilter);
+  const projectIds = [...projectIdsSet];
+
+  // Get all tasks the user can see
+  const taskQuery = { $or: [{ assignedTo: req.user._id }] };
+  if (!isMember) {
+    // Admins see all tasks in accessible projects
+    taskQuery.project = { $in: projectIds };
+  } else {
+    // Members: tasks in accessible projects OR assigned to them
+    taskQuery.$or.push({ project: { $in: projectIds } });
+  }
+
+  const tasks = await Task.find(taskQuery);
 
   const now = new Date();
   const overdueCount = tasks.filter(
@@ -23,7 +36,7 @@ export const getDashboard = async (req, res) => {
   ).length;
 
   const stats = {
-    totalProjects: projects.length,
+    totalProjects: projectIds.length,
     totalTasks: tasks.length,
     todo: tasks.filter((task) => task.status === "Todo").length,
     inProgress: tasks.filter((task) => task.status === "In Progress").length,

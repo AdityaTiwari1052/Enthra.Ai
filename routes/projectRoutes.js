@@ -11,6 +11,7 @@ router.use(protect);
 router.get("/", asyncHandler(getProjects));
 router.post(
   "/",
+  [authorize("Admin")],
   [
     body("name").trim().notEmpty().withMessage("Project name is required"),
     body("description").optional().isString(),
